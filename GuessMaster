@@ -1,0 +1,337 @@
+import random
+import time
+import json
+import os
+from rich import print
+from rich.console import Console
+
+console = Console()
+
+# ==== GLOBAL STATE ====
+inventory = {}
+budget = 1000
+hints_pinned = []
+achievements = set()
+leaderboard = {'Classic': [], 'VS Bot': [], 'Code Cracker': [], 'Survival': [], 'Multiplayer': [], 'Memory': []}
+player_profiles = {}
+current_profile = None
+save_file = "guess_master_save.json"
+story_level = 1
+daily_challenges = {}
+rooms = {}  # multiplayer rooms
+current_theme_name = 'normal'
+
+# ==== THEMES ====
+THEMES = {
+    'normal': {'primary':'yellow','secondary':'bright_black','highlight':'white','error':'red','success':'green'},
+    'default': {'primary':'magenta','secondary':'cyan','highlight':'yellow','error':'red','success':'green'},
+    'dark': {'primary':'bright_white','secondary':'bright_blue','highlight':'bright_yellow','error':'bright_red','success':'bright_green'},
+    'forest': {'primary':'green','secondary':'dark_green','highlight':'yellow','error':'red','success':'bright_green'},
+    'ocean': {'primary':'bright_cyan','secondary':'blue','highlight':'bright_yellow','error':'bright_red','success':'bright_green'},
+    'neon': {'primary':'bright_magenta','secondary':'bright_cyan','highlight':'bright_yellow','error':'bright_red','success':'bright_green'},
+    'retro': {'primary':'bright_yellow','secondary':'bright_blue','highlight':'cyan','error':'red','success':'magenta'},
+    'candy': {'primary':'magenta','secondary':'bright_red','highlight':'bright_white','error':'red','success':'yellow'},
+    'ice': {'primary':'bright_blue','secondary':'cyan','highlight':'white','error':'bright_red','success':'bright_cyan'},
+    'sunset': {'primary':'red','secondary':'yellow','highlight':'bright_red','error':'magenta','success':'bright_yellow'},
+    'lava': {'primary':'red','secondary':'bright_black','highlight':'yellow','error':'bright_red','success':'red'},
+    'galaxy': {'primary':'bright_magenta','secondary':'blue','highlight':'bright_cyan','error':'red','success':'bright_magenta'},
+    'pastel': {'primary':'bright_yellow','secondary':'bright_magenta','highlight':'cyan','error':'red','success':'bright_green'},
+    'monochrome': {'primary':'white','secondary':'bright_black','highlight':'white','error':'bright_red','success':'bright_white'},
+}
+current_theme = THEMES[current_theme_name]
+
+# ==== HELPER FUNCTIONS ====
+def colored_print(msg, color=None):
+    if color:
+        console.print(msg, style=color)
+    else:
+        console.print(msg)
+
+def ascii_title(text):
+    primary = current_theme['primary']
+    secondary = current_theme['secondary']
+    colored_print("\n" + "="*60, secondary)
+    colored_print(f"🎲  {text}  🎲".center(60), primary)
+    colored_print("="*60 + "\n", secondary)
+
+def save_game():
+    global current_theme_name
+    try:
+        with open(save_file,'w') as f:
+            json.dump({
+                'profiles': player_profiles,
+                'leaderboard': leaderboard,
+                'achievements': list(achievements),
+                'inventory': inventory,
+                'budget': budget,
+                'hints_pinned': hints_pinned,
+                'current_theme': current_theme_name,
+                'daily_challenges': daily_challenges,
+                'story_level': story_level
+            }, f)
+        colored_print("💾 Game saved successfully.", current_theme['success'])
+    except Exception as e:
+        colored_print(f"Error saving game: {e}", current_theme['error'])
+
+def load_game():
+    global player_profiles, leaderboard, achievements, inventory, budget, hints_pinned, current_theme, current_theme_name, daily_challenges, story_level
+    if not os.path.exists(save_file):
+        return
+    try:
+        with open(save_file,'r') as f:
+            data = json.load(f)
+            player_profiles = data.get('profiles', {})
+            for mode in leaderboard: leaderboard[mode] = data.get('leaderboard', {}).get(mode, [])
+            achievements.clear(); achievements.update(data.get('achievements', []))
+            inventory.clear(); inventory.update(data.get('inventory', {}))
+            budget = data.get('budget', 0)
+            hints_pinned.clear(); hints_pinned.extend(data.get('hints_pinned', []))
+            current_theme_name = data.get('current_theme','normal')
+            current_theme = THEMES.get(current_theme_name, THEMES['normal'])
+            daily_challenges = data.get('daily_challenges', {})
+            story_level = data.get('story_level',1)
+        colored_print("📂 Game loaded successfully.", current_theme['success'])
+    except Exception as e:
+        colored_print(f"Error loading game: {e}", current_theme['error'])
+
+# ==== PROFILE MANAGEMENT ====
+def create_profile():
+    global current_profile
+    ascii_title("CREATE NEW PROFILE")
+    while True:
+        name = input("Enter your player name: ").strip()
+        if not name:
+            colored_print("Name cannot be empty.", current_theme['error'])
+            continue
+        if name in player_profiles:
+            colored_print("Profile already exists. Choose a different name.", current_theme['error'])
+            continue
+        player_profiles[name] = {'achievements': [], 'scores': {}, 'games_played': 0, 'budget_total': 0}
+        current_profile = name
+        colored_print(f"Profile '{name}' created and loaded.", current_theme['success'])
+        break
+
+def load_profile():
+    global current_profile
+    if not player_profiles:
+        colored_print("No profiles found, please create one first.", current_theme['error'])
+        return False
+    ascii_title("LOAD PROFILE")
+    for i, name in enumerate(player_profiles.keys(), 1):
+        colored_print(f"{i}. {name}", current_theme['secondary'])
+    choice = input("Select profile by number or name (or 'cancel'): ").strip()
+    if choice.lower() == 'cancel':
+        return False
+    if choice.isdigit():
+        idx = int(choice)-1
+        if 0<=idx<len(player_profiles):
+            current_profile = list(player_profiles.keys())[idx]
+            colored_print(f"Profile '{current_profile}' loaded.", current_theme['success'])
+            return True
+        else:
+            colored_print("Invalid profile number.", current_theme['error'])
+            return False
+    elif choice in player_profiles:
+        current_profile = choice
+        colored_print(f"Profile '{current_profile}' loaded.", current_theme['success'])
+        return True
+    else:
+        colored_print("Invalid profile name.", current_theme['error'])
+        return False
+
+# ==== SHOP ====
+ITEMS = {
+    'undo': {'name': 'Undo Move', 'cost': 300},
+    'hint': {'name': 'Extra Hint', 'cost': 500},
+    'range': {'name': 'Reveal Range', 'cost': 700},
+    'attempt': {'name': 'Extra Attempt', 'cost': 600},
+    'shield': {'name': 'Shield', 'cost': 900},
+    'digit': {'name': 'Reveal Last Digit', 'cost': 400},
+    'double': {'name': 'Double Your Budget', 'cost': 1000},
+    'xray': {'name': 'X-Ray (Is number > 50?)', 'cost': 450},
+}
+
+def shop():
+    global budget, inventory
+    ascii_title("🛒 SHOP MENU")
+    colored_print(f"💰 Your Budget: €{budget}", current_theme['primary'])
+    colored_print("="*40, current_theme['secondary'])
+    for key, item in ITEMS.items():
+        colored_print(f"[{key}] {item['name']} — €{item['cost']}", current_theme['highlight'])
+    colored_print("="*40, current_theme['secondary'])
+    choice = input("Buy which item (key)? (or 'exit' to leave): ").strip().lower()
+    if choice=='exit': return
+    if choice not in ITEMS: colored_print("❌ Invalid item key.", current_theme['error']); return
+    cost = ITEMS[choice]['cost']
+    if budget < cost: colored_print("❌ Not enough budget.", current_theme['error']); return
+    budget -= cost
+    inventory[choice] = inventory.get(choice, 0) + 1
+    colored_print(f"✅ You bought {ITEMS[choice]['name']}! Remaining budget: €{budget}", current_theme['success'])
+
+# ==== GAME MODES ====
+def classic_mode():
+    global budget
+    ascii_title("Classic Mode: Guess the Number!")
+    secret = random.randint(1,100)
+    attempts=7
+    start=time.time()
+    colored_print(f"Budget: €{budget}. You have {attempts} attempts to guess the secret number.", current_theme['highlight'])
+    while attempts>0:
+        colored_print(f"\nAttempts left: {attempts}", current_theme['primary'])
+        guess=input("Your guess (or 'shop'/'inventory'/'quit'): ").strip().lower()
+        if guess=='shop': shop(); continue
+        if guess=='inventory': colored_print(f"Inventory: {inventory}", current_theme['highlight']); continue
+        if guess=='quit': break
+        try: g=int(guess)
+        except: colored_print("Enter a number.", current_theme['error']); continue
+        if g==secret:
+            elapsed=int(time.time()-start)
+            score=max(1000-elapsed*5,100)
+            colored_print(f"🎉 Correct! Number was {secret}. Score: €{score}", current_theme['success'])
+            budget+=score
+            leaderboard['Classic'].append(score)
+            save_game()
+            break
+        elif g<secret: colored_print("Too low!", current_theme['highlight'])
+        else: colored_print("Too high!", current_theme['highlight'])
+        attempts-=1
+    if attempts==0:
+        colored_print(f"💥 Out of attempts! Number was {secret}.", current_theme['error'])
+        save_game()
+
+# For simplicity, other modes are short playable versions
+def vs_bot_mode():
+    ascii_title("VS Bot Mode")
+    colored_print("Guess a number, Bot guesses too! First to match 50 wins.", current_theme['highlight'])
+    bot = random.randint(1,50)
+    player = random.randint(1,50)
+    colored_print(f"You got {player}, Bot got {bot}", current_theme['primary'])
+    if player>=bot: colored_print("🎉 You win!", current_theme['success'])
+    else: colored_print("😢 Bot wins!", current_theme['error'])
+
+def code_cracker_mode():
+    ascii_title("Code Cracker Mode")
+    code = random.randint(100,999)
+    guess = int(input("Guess 3-digit code: "))
+    if guess == code: colored_print("🎉 Correct!", current_theme['success'])
+    else: colored_print(f"❌ Wrong! It was {code}", current_theme['error'])
+
+def survival_mode():
+    ascii_title("Survival Mode")
+    attempts = 5
+    score = 0
+    while attempts>0:
+        num = random.randint(1,10)
+        guess = int(input(f"Guess number 1-10 ({attempts} left): "))
+        if guess==num: score+=1; colored_print("✅ Correct!", current_theme['success'])
+        else: colored_print(f"❌ Wrong! It was {num}", current_theme['error'])
+        attempts-=1
+    colored_print(f"Final score: {score}", current_theme['highlight'])
+
+def memory_mode():
+    ascii_title("Memory Mode")
+    seq = [random.randint(0,9) for _ in range(5)]
+    print("Sequence: ", seq)
+    time.sleep(2)
+    os.system('clear')
+    guess = input("Enter sequence: ").strip().split()
+    guess = list(map(int,guess))
+    if guess==seq: colored_print("🎉 Correct!", current_theme['success'])
+    else: colored_print(f"❌ Wrong! It was {seq}", current_theme['error'])
+
+# ==== MULTIPLAYER ====
+def multiplayer():
+    ascii_title("MULTIPLAYER")
+    while True:
+        code = input("Enter 4-digit room code (or 'new' to create room): ").strip()
+        if code.lower()=='new':
+            code = str(random.randint(1000,9999))
+            rooms[code] = []
+            colored_print(f"Room created! Share code {code}", current_theme['success'])
+        if code not in rooms:
+            colored_print("Room not found.", current_theme['error'])
+            continue
+        rooms[code].append(current_profile)
+        colored_print(f"Joined room {code}. Players: {rooms[code]}", current_theme['highlight'])
+        break
+    # Choose game mode
+    modes = ['Classic','VS Bot','Code Cracker','Survival','Memory']
+    for i,m in enumerate(modes,1):
+        colored_print(f"{i}. {m}", current_theme['primary'])
+    choice = input("Select game mode: ").strip()
+    if choice.isdigit():
+        idx = int(choice)-1
+        if idx>=0 and idx<len(modes):
+            mode_name = modes[idx]
+            if mode_name=='Classic': classic_mode()
+            elif mode_name=='VS Bot': vs_bot_mode()
+            elif mode_name=='Code Cracker': code_cracker_mode()
+            elif mode_name=='Survival': survival_mode()
+            elif mode_name=='Memory': memory_mode()
+    else:
+        colored_print("Invalid choice.", current_theme['error'])
+
+# ==== THEME SELECTION ====
+def select_theme():
+    global current_theme, current_theme_name
+    ascii_title("THEME SELECTION")
+    themes = list(THEMES.keys())
+    for i, t in enumerate(themes,1):
+        colored_print(f"{i}. {t}", current_theme['primary'])
+    choice = input("Choose theme number: ").strip()
+    if choice.isdigit():
+        idx=int(choice)-1
+        if 0<=idx<len(themes):
+            current_theme_name = themes[idx]
+            current_theme = THEMES[current_theme_name]
+            colored_print(f"Theme changed to {current_theme_name}", current_theme['success'])
+    else:
+        colored_print("Invalid choice.", current_theme['error'])
+
+# ==== MAIN MENU ====
+def main_menu():
+    ascii_title("Guess Master - Main Menu")
+    colored_print("1. Create Profile", current_theme['primary'])
+    colored_print("2. Load Profile", current_theme['primary'])
+    colored_print("3. Game Modes", current_theme['primary'])
+    colored_print("4. Shop", current_theme['primary'])
+    colored_print("5. Save Game", current_theme['primary'])
+    colored_print("6. Load Game", current_theme['primary'])
+    colored_print("7. Multiplayer", current_theme['primary'])
+    colored_print("8. Theme", current_theme['primary'])
+    colored_print("9. Quit", current_theme['primary'])
+    return input("Choose option: ").strip()
+
+def main():
+    load_game()
+    while True:
+        choice = main_menu()
+        if choice=='1': create_profile()
+        elif choice=='2': load_profile()
+        elif choice=='3':  # Game modes
+            ascii_title("GAME MODES")
+            modes = ['Classic','VS Bot','Code Cracker','Survival','Memory']
+            for i,m in enumerate(modes,1):
+                colored_print(f"{i}. {m}", current_theme['primary'])
+            c = input("Choose mode: ").strip()
+            if c.isdigit():
+                idx=int(c)-1
+                if 0<=idx<len(modes):
+                    mode_name=modes[idx]
+                    if mode_name=='Classic': classic_mode()
+                    elif mode_name=='VS Bot': vs_bot_mode()
+                    elif mode_name=='Code Cracker': code_cracker_mode()
+                    elif mode_name=='Survival': survival_mode()
+                    elif mode_name=='Memory': memory_mode()
+            else:
+                colored_print("Invalid choice.", current_theme['error'])
+        elif choice=='4': shop()
+        elif choice=='5': save_game()
+        elif choice=='6': load_game()
+        elif choice=='7': multiplayer()
+        elif choice=='8': select_theme()
+        elif choice=='9': break
+        else: colored_print("Invalid choice.", current_theme['error'])
+
+if __name__=="__main__":
+    main()
